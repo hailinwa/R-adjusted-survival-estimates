@@ -9,10 +9,10 @@ This R function was developed for producing direct adjusted survival estimates b
 ``` R
 diff.adj.surv.v3 <- function(indata, coxf, seednum=, n.sim=, cb.alpha=, starttime=NULL, endtime=NULL)
 ```
-`indata`: input matrix containing event indicator, time to event and co-variates to be considered in stratified Cox model
-`coxf`: Cox model in format of `Survival` object
-`seednum`: seed number for replication of simulated results
-`n.sim`: number of simulation round for generating survival confidence band
-`cb.alpha`: alpha level (typicall 0.05)
-`starttime`: start time for confidence band consideration
-`endtime`: end time for confidence band consideration
+`indata`: input matrix containing event indicator, time to event and co-variates to be considered in stratified Cox model  
+`coxf`: Cox model in format of `Survival` object  
+`seednum`: seed number for replication of simulated results  
+`n.sim`: number of simulation round for generating survival confidence band  
+`cb.alpha`: alpha level (typicall 0.05)  
+`starttime`: start time for confidence band consideration  
+`endtime`: end time for confidence band consideration  
