@@ -1,18 +1,17 @@
-###########################################function##############################################
 diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FALSE, 
                              seednum=1986, n.sim=2000, cb.alpha=.05, starttime=NULL, endtime=NULL){
+
 ####data manipulation####
+  #include libraries
+  libs <- c("survival", "plyr", "tictoc")
+  lapply(libs, require, character.only = TRUE)
   #check abnormal arguments
-      # check "Surv" object must be there
+  # check "Surv" object must be there
   if (diff == FALSE & diff.cb == TRUE) stop("DIFF argument must be TRUE for computing confidence band of difference")
   if (cb.alpha <= 0 | cb.alpha >= 1) stop("alpha must be within (0,1)")
   
-  #start runtime counting
-  ptm <- proc.time()
-  #include libraries
-  libs <- c("survival", "plyr")
-  lapply(libs, require, character.only = TRUE)
-  
+tic("Total time")
+tic("check data") 
   #extract strata variable from formula
   scoxf <- deparse(substitute(coxf[[3]]), width.cutoff = 500)
   strata <- gsub("strata\\((.*?)\\)", "\\1", regmatches(scoxf, regexpr("strata\\(.*?\\)", scoxf)))
@@ -32,25 +31,33 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
   event <- tm.evt[2]
 
   #exclude case with missing event or time
-  if (is.na(indata[[time]]) | is.na(indata[[event]])) warning("Deleted cases w/ missing event or time")
   indata <- subset(indata, !is.na(indata[[time]]) & !is.na(indata[[event]]))
-  
+toc()
+tic("coxph")
   # fit stratified cox model
   cox <- coxph(coxf, data = indata, ties = "breslow", model = TRUE)
-  # details of Cox model
   coxd <- coxph.detail(cox, riskmat = TRUE)
+toc()
 
-####Adjusted survival w/ variance####
+####general matrix / vector set up####
+tic("matrix setup")
       nt <- NROW(coxd$time)             #number of distinct time points by strata (coxph output)
       nz <- NCOL(coxd$x)                #number of risk factor
       nl <- NROW(coxd$x)                #number of cases
       ns <- NROW(coxd$strata)           #number of strata
-      #create pooled time list
+  #create pooled time list
       bytime <- sort(unique(indata[[time]][which(indata[[event]] == 1)]))
       nt.unique <- length(bytime)
-      #obtain sorted value of strata variable
+  #obtain sorted value of strata variable
       bystrata <- sort(unique(indata[[strata]]))
-      
+  #create mapping matrix pointing to the location of adj.surv and other computed matrices
+      byloc <- matrix(, nrow = nt.unique, ncol = ns)
+      for (s in 1 : ns){
+        for (t in 1 : nt.unique){
+          cur.time <- suppressWarnings(max(indata[[time]][which(indata[[strata]] == bystrata[s] & indata[[time]] <= bytime[t] & indata[[event]] == 1)]))
+          byloc[t, s] <- suppressWarnings(min(which(indata[[strata]] == bystrata[s] & indata[[time]] == cur.time & indata[[event]] == 1)))
+        }
+      }
   #order coxd$x by case (to match with coxd$riskmat and case order from original data)
       if (nz == 1){coxd$x <- matrix(coxd$x[order(as.numeric(names(coxd$x)))], nrow = nl, ncol = 1)}
       else {coxd$x <- coxd$x[order(as.numeric(row.names(coxd$x))), ]}
@@ -61,7 +68,25 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
         histmat[l, which(indata[[strata]] == indata[[strata]][l] & indata[[time]] <= indata[[time]][l])] = 1
         riskmat[l, which(indata[[strata]] == indata[[strata]][l] & indata[[time]] >= indata[[time]][l])] = 1
       }
-
+toc()
+tic("N at risk")
+  # compute N at risk within each strata at pooled event time
+      indata$oneind <- 1
+      nrcox <- suppressWarnings(coxph(Surv(indata[[time]],oneind)~strata(indata[[strata]])+factor(indata[[event]]), data = indata, ties = "breslow"))
+      nrcoxd <- coxph.detail(nrcox)
+      nrdat <- as.matrix(cbind(indata[[strata]], indata[[time]]))
+      nrdat <- plyr::count(nrdat[order(nrdat[, 1], nrdat[, 2]), ])
+      nr.names <- NULL
+      n.risk <- matrix(, nrow = nt.unique , ncol = ns)
+      for (s in 1 : ns){
+        for (t in 1 : nt.unique){
+          n.risk[t, s] <- suppressWarnings(max(nrcoxd$nrisk[which(nrdat[1] == bystrata[s] & nrdat[2] >= bytime[t])]))
+        }
+        nr.names <- c(nr.names, paste("Nrisk", strata, bystrata[s], sep = "_"))
+      }
+toc()
+tic("DAS")
+####Adjusted survival w/ variance####
   #zbeta (by case): nlx1
       zbeta <- coxd$x %*% cox$coefficients
   #weighted zbeta, combination of z and calculated zbeta: nl.w x (nz+zbeta+count)
@@ -89,7 +114,8 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
       ch0 <- histmat %*% h0
   #Predicted survival probability by Z: nlxnl.w (weighted)
       s.w <- exp(-ch0 %*% t(exp(zbeta.w)))
-
+toc()
+tic("V1+V2")    
   #variance of adj. survival
     #V1
       v1core <- histmat %*% (indata[[event]] / (s0beta ^ 2))
@@ -110,41 +136,47 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
         ssh[, i] = (s.w * ( histmat %*% ((z.w.rep - ebeta.rep) * (h0 %*% t(exp(zbeta.w)))))) %*% weight
       }
       v2 <- diag(ssh %*% cox$var %*% t(ssh)) / (nl ^ 2)
+toc()
     #sum
       adjvar <- v1 + v2
       adjse <- sqrt(adjvar)
     #Directly adjusted survival prob
       adjsurv <- (s.w %*% weight) / nl
-      
+
   #output adjsurv w/ var
-    if (das.cb == FALSE){
       adj.s <- as.matrix(cbind(indata[[strata]], indata[[time]], indata[[event]], adjsurv, adjse))
       adj.s <- subset(adj.s, adj.s[, 3] == 1)
       adj.s <- plyr::count(adj.s[order(adj.s[, 1], adj.s[, 2]), ])
       adj.s.out <- cbind(adj.s[, 1:2], coxd$nrisk, coxd$nevent, adj.s[, 4:5])
       colnames(adj.s.out) <- c('strata', 'time', 'nrisk', 'nevent', 'adjsurv', 'adjse')
       das <- list()
-      das[["surv"]] <- adj.s.out
-    }
+      das[["DAS"]] <- adj.s.out
+
+tic("CB sim setup")
 ####Confidence band for adjusted survival####
   if (das.cb == TRUE | diff.cb == TRUE){
       #generate G for each case
       set.seed(seednum)
       gcase <- matrix(rnorm(as.integer(nl * n.sim), mean = 0, sd = 1), nrow = nl, ncol = n.sim)
       gevent <- gcase * as.vector(indata[[event]])
-      
       h0.sim <- gevent / as.vector(s0beta)
       ch0.sim <- histmat %*% h0.sim
       w1.sim <- as.vector(-(s.w %*% (weight * exp(zbeta.w)))) * ch0.sim / nl
-      ubeta.sim <- t(coxd$x - ebeta) %*% gevent
+      # ubeta.sim <- t(coxd$x - ebeta) %*% gevent
       betadiff.sim <- cox$var %*% (t(coxd$x - ebeta) %*% gevent)
-      
-      t1 <- ifelse(is.null(starttime), min(indata[[time]]), starttime)
-      t2 <- ifelse(is.null(endtime), max(indata[[time]]), endtime)
-  }
-      
-  if (das.cb == TRUE){
       w2.sim <- -(ssh %*% betadiff.sim) / nl
+      tmin.bystrata <- NULL
+      tmax.bystrata <- NULL
+      for (s in 1:ns){
+        tmin.bystrata[s] <- min(coxd$time[which(adj.s[1] == s & coxd$nevent > 0)])
+        tmax.bystrata[s] <- max(coxd$time[which(adj.s[1] == s & coxd$nrisk >= 15)])
+      }
+      t1 <- ifelse(is.null(starttime), max(tmin.bystrata), starttime)
+      t2 <- ifelse(is.null(endtime), min(tmax.bystrata), endtime)
+  }
+toc()
+tic("DAS CB")
+  if (das.cb == TRUE){
       w.sim <- w1.sim + w2.sim
       cband <- matrix(, nrow = nl , ncol = 2)
       for (s in 1:ns){
@@ -154,38 +186,32 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
         cband[loc.t12 , 1] = (adjsurv - c.alpha * adjse)[loc.t12]
         cband[loc.t12 , 2] = (adjsurv + c.alpha * adjse)[loc.t12]
       }
-  
-    #output adjsurv w/ var, CB      
-      adj.s.cb <- as.matrix(cbind(indata[[strata]], indata[[time]], indata[[event]], adjsurv, adjse, cband))
+
+    #output adjsurv w/ var, CB
+      adj.s.cb <- as.matrix(cbind(indata[[strata]], indata[[time]], indata[[event]], cband))
       adj.s.cb <- subset(adj.s.cb, adj.s.cb[, 3] == 1)
       adj.s.cb <- plyr::count(adj.s.cb[order(adj.s.cb[, 1], adj.s.cb[, 2]), ])
-      adj.s.cb.out <- cbind(adj.s.cb[, 1:2], coxd$nrisk, coxd$nevent, adj.s.cb[, 4:7])
-      colnames(adj.s.cb.out) <- c('strata', 'time', 'nrisk', 'nevent', 'adjsurv', 'adjse', 'lcb', 'ucb')
+      adj.s.cb.out <- cbind(adj.s.out, adj.s.cb[, 4:5])
+      colnames(adj.s.cb.out)[7:8] <- c('lcb', 'ucb')
       das <- list()
-      das[["surv"]] <- adj.s.cb.out
+      das[["DAS"]] <- adj.s.cb.out
   }
+toc()
+tic("DAS diff+var")
 ####Difference of adjusted survival w/ variance####
-    #create mapping matrix pointing to the location of adj.surv and other computed matrices
-      byloc <- matrix(, nrow = nt.unique, ncol = ns)
-      for (s in 1:ns){
-        cur.strata <- bystrata[s]
-        for (t in 1:nt.unique){
-          cur.time <- suppressWarnings(max(indata[[time]][which(indata[[strata]] == cur.strata & indata[[time]] <= bytime[t] & indata[[event]] == 1)]))
-          byloc[t, s] <- suppressWarnings(min(which(indata[[strata]] == cur.strata & indata[[time]] == cur.time & indata[[event]] == 1)))
-        }
-      }
-
   if (diff == TRUE){
     #Diff between adjusted survival
         sc <- t(combn(ns, 2))
         nsc <- NROW(sc) #sum(1:(ns-1))
         adjvdiff <- matrix(, nrow = nt.unique, ncol = sum(1:ns))
-        wdiff <- matrix(, nrow = nt.unique, ncol = nsc)
+        wdiff <- matrix(, nrow = nt.unique, ncol = sum(1:ns))
         wdiff.names <- NULL
         se.names <- NULL
-    #variance for individual strata
+    #DAS, variance for individual strata
         for (s in 1:ns){
+          wdiff[, s] <- adjsurv[byloc[, s]]
           adjvdiff[, s] <- adjvar[byloc[, s]]
+          wdiff.names <- c(wdiff.names, paste("DAS", strata, bystrata[s], sep = "_"))
           se.names <- c(se.names, paste("SE", strata, bystrata[s], sep = "_"))
         }
     #variance of survival difference between 2 selected groups
@@ -193,7 +219,7 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
           s1 <- sc[s, 1]
           s2 <- sc[s, 2]
           #survival difference between 2 selected groups: nt.unique x combination of strata
-          wdiff[, s] <- adjsurv[byloc[, s1]]-adjsurv[byloc[, s2]]
+          wdiff[, ns+s] <- adjsurv[byloc[, s1]]-adjsurv[byloc[, s2]]
           #variance
           adjvdiff[, ns+s] <- suppressWarnings(v1[byloc[, s1]] + v1[byloc[, s2]] +
           diag((ssh[byloc[, s1], ] - ssh[byloc[, s2], ]) %*% cox$var %*% t(ssh[byloc[, s1], ] - ssh[byloc[, s2], ])) / (nl^2))
@@ -206,27 +232,29 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
   #output difference of adjusted survival
       colnames(wdiff) <- wdiff.names
       colnames(adjsediff) <- se.names
-      adj.s.d <- data.frame(cbind(bytime, wdiff, adjsediff))
+      colnames(n.risk) <- nr.names
+
+      adj.s.d <- data.frame(cbind(bytime, n.risk, wdiff, adjsediff))
       colnames(adj.s.d)[1] <- c('time')
       das[["diff"]] <- adj.s.d
   }
+toc()
 ####Simulated confidence band for difference of survival####
   if (diff.cb == TRUE){
+tic("Diff CB")
     #map to position of pooled time list
     byloc.t12 <- which(bytime >= t1 & bytime <= t2)
     bytime.t12 <- bytime[byloc.t12]
     nt.sim <- NROW(bytime.t12)
     
-    diff.cband <- matrix(, nrow = nt.sim, ncol = (2*nsc))
+    diff.cband <- matrix(, nrow = nt.unique, ncol = (2 * nsc))
     pvalue <- matrix(, nrow = 1, ncol = nsc)
-    cb.names <- NULL
+    diffcb.names <- NULL
     p.names <- NULL
     for (s in 1:nsc){
       s1 <- sc[s, 1]
       s2 <- sc[s, 2]
-      #wdiff.sim and c-alpha
-      wdiff.sim <- suppressWarnings(w1.sim[byloc[, s1], ] + w1.sim[byloc[, s2], ] +
-            ((ssh[byloc[, s1], ] - ssh[byloc[, s2], ]) %*% betadiff.sim) / nl)
+      wdiff.sim <- suppressWarnings(w1.sim[byloc[, s1], ] + w1.sim[byloc[, s2], ] - (w2.sim[byloc[, s1], ] - w2.sim[byloc[, s2], ]))
       diff.qb <- sort(apply(abs(wdiff.sim[byloc.t12, ] / adjsediff[byloc.t12, ns+s]), 2, max, na.rm = TRUE))
       diff.c.alpha <- diff.qb[round(n.sim * (1 - cb.alpha))]
       #band
@@ -235,19 +263,17 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
       qmax <- max((abs(wdiff[byloc.t12, s] / adjsediff[byloc.t12, ns+s])), na.rm = TRUE)
       pvalue[s] <- length(which(diff.qb>qmax)) / n.sim
       #column names
-      cb.names <- c(cb.names, paste("LCB", strata, bystrata[s1], bystrata[s2], sep = "_"), paste("UCB", strata, bystrata[s1], bystrata[s2], sep = "_"))
+      diffcb.names <- c(diffcb.names, paste("LCB", strata, bystrata[s1], bystrata[s2], sep = "_"), paste("UCB", strata, bystrata[s1], bystrata[s2], sep = "_"))
       p.names <- c(p.names, paste("pvalue", strata, bystrata[s1], bystrata[s2], sep = "_"))
     }
-
   #output confidence band
     w.t12 <- as.matrix(wdiff[byloc.t12, ])
     colnames(w.t12) <- wdiff.names
-    colnames(diff.cband) <- cb.names
-    adj.s.d.cb <- data.frame(cbind(bytime.t12, diff.cband))
+    colnames(diff.cband) <- diffcb.names
+    adj.s.d.cb <- data.frame(cbind(bytime, diff.cband))
     colnames(adj.s.d.cb)[1] <- c('time')
     adj.s.d <- merge(adj.s.d, adj.s.d.cb, by.x = "time", by.y = "time", all.x = TRUE)
     das[["diff"]] <- adj.s.d
-    
   #output p-value of confidence band (within selected time range)
     colnames(pvalue) <- p.names
     rownames(pvalue) <- "p-value"
@@ -259,14 +285,25 @@ diff.adj.surv.v2 <- function(indata, coxf, das.cb=FALSE, diff=FALSE, diff.cb=FAL
     das[["sim.param"]] <- adj.s.d.cb.sim
   }
 
-####post misc.####
-  #end runtime counting
-  ptm <- proc.time()-ptm
-  print(ptm)
+  #output overall pooled dataset
+  
 
-  return(das)
-  }
-#################################################################################################
+toc()
+toc()
+return(das)
+}
+
+
+
+rm(das.b.v2)
+das.b.v2<-diff.adj.surv.v2(indata=checked,coxf=Surv(intxrel,dfs)~strata(condted)+factor(yeartx)+factor(karnofcat),
+                           das.cb=T,diff=T,diff.cb=T,seednum=2018,n.sim=2000,starttime=,endtime=)
+
+View(das.b.v2)
+
+das.a.v2<-diff.adj.surv.v2(indata=lk1601,coxf=Surv(intxsurv,dead)~strata(trtgp)+factor(kps)+factor(leuk2)+factor(donorgp),
+                           das.cb=T,diff=T,diff.cb=T,seednum=2018,n.sim=2000,starttime=,endtime=)
+
 das.diff.plot <- function(indata, strata, gp1, gp2, ci = TRUE, ci.alpha = 0.05, cb = TRUE, xmax = NULL, ymax = .5) {
   libs <- c("ggplot2")
   lapply(libs, require, character.only = TRUE)
@@ -307,14 +344,11 @@ das.diff.plot <- function(indata, strata, gp1, gp2, ci = TRUE, ci.alpha = 0.05, 
       geom_hline(yintercept = 0, linetype = 5)
   return(fig)
 }
-#################################################################################################
-das.a.v2<-diff.adj.surv.v2(indata=lk1601,coxf=Surv(intxsurv,dead)~strata(trtgp)+factor(kps)+factor(leuk2)+factor(donorgp),
-                     das.cb=T,diff=F,diff.cb=F,seednum=2018,n.sim=2000,starttime=,endtime=)
 
-das.b.v2<-diff.adj.surv.v2(indata=checked,coxf=Surv(intxrel,dfs)~strata(condted)+factor(yeartx),
-                           das.cb=T,diff=T,diff.cb=T,seednum=2018,n.sim=2000,starttime=5,endtime=30)
 
-View(das.b.v2$diff)
+View(cbind(das.b.v2$time,das.b.v2$nevent,das.b.v2$nrisk))
+
+
 
 
 fig.a<-das.diff.plot(indata=das.a.v2,strata="trtgp",gp1=0,gp2=1,ci=TRUE,ci.alpha=0.05,cb=TRUE,xmax=60)
