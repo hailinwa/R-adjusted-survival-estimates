@@ -1,10 +1,11 @@
-diff.adj.surv.v2 <- function(indata, coxf, seednum=1986, n.sim=2000, cb.alpha=.05, starttime=NULL, endtime=NULL){
+diff.adj.surv.v3 <- function(indata, coxf, seednum=1986, n.sim=2000, cb.alpha=.05, starttime=NULL, endtime=NULL){
 
-tic("Total time")
-####data manipulation####
   #include libraries
   libs <- c("survival", "plyr", "tictoc")
   lapply(libs, require, character.only = TRUE)
+  
+tic("Total time")
+####data manipulation####
   #check abnormal arguments
   # check "Surv" object must be there
   if (cb.alpha <= 0 | cb.alpha >= 1) stop("alpha must be within (0,1)")
@@ -24,12 +25,21 @@ tic("check data")
     else (deparse(x))
   }
   tm.evt <- terms.y(coxf)
-  if (length(tm.evt) != 2) stop("Must specify one time and one event in Surv function")
-  time <- tm.evt[1]
-  event <- tm.evt[2]
 
-  #exclude case with missing event or time
-  indata <- subset(indata, !is.na(indata[[time]]) & !is.na(indata[[event]]))
+  
+  if (length(tm.evt) == 2){#regular cox
+    time <- tm.evt[1]
+    event <- tm.evt[2]
+    indata <- subset(indata, indata[[time]] > 0 & indata[[event]] >= 0)
+    }
+  else if (length(tm.evt) == 3){#left truncated cox
+    ltime <- tm.evt[1]
+    time <- tm.evt[2]
+    event <- tm.evt[3]
+    indata <- subset(indata, indata[[time]] > 0 & indata[[event]] >= 0 & indata[[ltime]] >= 0)
+    }
+  else {stop("Incorrect number of time and event parameter")}  
+
 toc()
 tic("coxph")
   # fit stratified cox model
@@ -46,6 +56,7 @@ tic("matrix setup")
       nst <- sum(1 : ns)
       sc <- t(combn(ns, 2))
       nsc <- NROW(sc)                   #number of strata combination
+      
   #create pooled time list
       bytime <- sort(unique(indata[[time]][which(indata[[event]] == 1)]))
       nt.unique <- length(bytime)
@@ -67,7 +78,10 @@ tic("matrix setup")
       riskmat <- matrix(0, nrow = nl, ncol = nl)
       for (l in 1 : nl){
         histmat[l, which(indata[[strata]] == indata[[strata]][l] & indata[[time]] <= indata[[time]][l])] = 1
-        riskmat[l, which(indata[[strata]] == indata[[strata]][l] & indata[[time]] >= indata[[time]][l])] = 1
+        if (exists("ltime") == TRUE)
+          {riskmat[l, which(indata[[strata]] == indata[[strata]][l] & indata[[time]] >= indata[[time]][l] & indata[[time]][l] > indata[[ltime]])] = 1}
+        else if (exists("ltime") == FALSE)
+          {riskmat[l, which(indata[[strata]] == indata[[strata]][l] & indata[[time]] >= indata[[time]][l])] = 1}
       }
 toc()
 
@@ -120,7 +134,7 @@ toc()
       adjse <- sqrt(adjvar)
     #Directly adjusted survival prob
       adjsurv <- (s.w %*% weight) / nl
-
+      
 tic("CB sim setup")
 ####Confidence band for adjusted survival####
       adj.s <- as.matrix(cbind(indata[[strata]], indata[[time]], indata[[event]]))
@@ -272,99 +286,38 @@ tic("output dataset")
   das[["sim.param"]] <- adj.s.d.cb.sim
 toc()
 toc()
+View(cbind(indata[[strata]],indata[[time]],indata[[event]],zbeta,s0beta,h0))
 return(das)
 }
 
 
 # das.a.v2<-diff.adj.surv.v2(indata=lk1601,coxf=Surv(intxsurv,dead)~strata(trtgp)+factor(kps)+factor(leuk2)+factor(donorgp),seednum=2018,n.sim=2000,starttime=,endtime=)
-das.a.v2<-diff.adj.surv.v2(indata=lk1601,coxf=Surv(intxsurv,dead)~strata(donorgp)+factor(kps)+factor(leuk2),seednum=2018,n.sim=2000,starttime=,endtime=)
-View(das.a.v2$DASpooled)
-View(das.a.v2$DAS)
+# das.a.v2<-diff.adj.surv.v2(indata=lk1601,coxf=Surv(intxsurv,dead)~strata(donorgp)+factor(kps)+factor(leuk2),seednum=2018,n.sim=2000,starttime=,endtime=)
+# View(das.a.v2$DASpooled)
+# View(das.a.v2$DAS)
+# rm(das.b.v2)
 
-rm(das.b.v2)
-das.b.v2<-diff.adj.surv.v2(indata=checked,coxf=Surv(intxrel,dfs)~strata(condted)+factor(yeartx)+factor(karnofcat),
-                           seednum=2018,n.sim=2000,starttime=,endtime=5)
-View(das.b.v2$DASpooled)
-View(das.b.v2$DAS)
+# das.b.v3<-diff.adj.surv.v3(indata=checked,coxf=Surv(intdxtx,indxsurv,dead)~strata(condted)+factor(yeartx)+factor(karnofcat),
+#                            seednum=2018,n.sim=2000,starttime=,endtime=)
+das.b.v3<-diff.adj.surv.v3(indata=checkrel,coxf=Surv(intdxtx,indxsurv,dead)~strata(condted)+factor(rel),
+                           seednum=2018,n.sim=2000,starttime=,endtime=)
+View(das.b.v3$DAS)
+View(das.b.v3$DASpooled)
+
 
 das.a.v2<-diff.adj.surv.v2(indata=m11n10000,coxf=Surv(time,event)~strata(strata)+z1+z2+z3+z4+z5+z6+z7+z8+z9+z10,seednum=2018,n.sim=1000,starttime=,endtime=)
 
 
-seq(1, 9, by = 2)
+cox <- coxph(Surv(indxsurv,dead)~strata(condted)+factor(yeartx)+factor(karnofcat), data = checked, ties = "breslow", model = TRUE)
+coxd <- coxph.detail(cox, riskmat = TRUE)
 
-das.diff.plot <- function(indata, strata, gp1, gp2, ci = TRUE, ci.alpha = 0.05, cb = TRUE, xmax = NULL, ymax = .5) {
-  libs <- c("ggplot2")
-  lapply(libs, require, character.only = TRUE)
-    if ((ci.alpha <= 0 | ci.alpha >= 1) & ci == TRUE) stop("alpha must be within (0,1)")
-    x.lim <- ifelse(is.null(xmax), NA, xmax)
-    y.lim <- ifelse(is.null(ymax), .5, ymax)
-    
-    se.data <- indata$diff
-    diff.name <- paste("Diff", strata, gp1, gp2, sep="_")
-    se.data$diff.name <- se.data[, diff.name]
-    if (ci == TRUE){
-      z <- qnorm(1-ci.alpha/2)
-      se.name <- paste("SE", strata, gp1, gp2, sep="_")
-      se.data$se.name <- se.data[, se.name]
-      se.data$lci <- se.data$diff.name - z*se.data$se.name
-      se.data$uci <- se.data$diff.name + z*se.data$se.name
-    }
-    if (cb == TRUE){
-      cb.data <- indata$diff.cb
-      p.data <- indata$diff.p
-      sim.data <- indata$sim.param
-      lcb.name <- paste("LCB", strata, gp1, gp2, sep = "_")
-      ucb.name <- paste("UCB", strata, gp1, gp2, sep = "_")
-      p.name <- paste("pvalue", strata, gp1, gp2, sep = "_")
-      cb.data$lcb.name <- cb.data[, lcb.name]
-      cb.data$ucb.name <- cb.data[, ucb.name]
-      p.data$p.name <- p.data[, p.name]
-      label.p <- paste("p-value = ", p.data$p.name, " for t in [", sim.data$t1, ", ", sim.data$t2, "]", sep = "")
-    }
-    fig <- ggplot()+
-      {if(cb)geom_ribbon(data = cb.data, aes(x = time, ymin = lcb.name, ymax = ucb.name), fill = 'cornflowerblue', alpha = 0.5)}+
-      geom_step(data = se.data, mapping = aes(x = time, y = diff.name))+
-      {if(ci)geom_step(data = se.data, mapping = aes(x = time, y = lci), linetype = 3)}+
-      {if(ci)geom_step(data = se.data, mapping = aes(x = time, y = uci), linetype = 3)}+
-      {if(cb)annotate(geom = "text", x = x.lim/6, y = y.lim, label = label.p)}+
-      scale_y_continuous(name = "Probability", limits = c(-y.lim, y.lim))+
-      scale_x_continuous(name = "Time", limits = c(0, x.lim))+
-      geom_hline(yintercept = 0, linetype = 5)
-  return(fig)
-}
-
-
-View(cbind(das.b.v2$time,das.b.v2$nevent,das.b.v2$nrisk))
+coxlt <- coxph(Surv(intdxtx,indxsurv,dead)~strata(condted)+factor(yeartx)+factor(karnofcat), data = checked, ties = "breslow", model = TRUE)
+coxdlt <- coxph.detail(coxlt, riskmat = TRUE)
 
 
 
 
-fig.a<-das.diff.plot(indata=das.a.v2,strata="trtgp",gp1=0,gp2=1,ci=TRUE,ci.alpha=0.05,cb=TRUE,xmax=60)
-plot(fig.a)
-
-View(cbind(das.a.v2$diff.cb,das.a$diff.cb))
-
-View(as.data.frame(das.a.v2))
-
-write.csv(das.c,"E:/Users/hwang/SAScode/04275 Applied survival analysis/Project/output.csv")
-
-cox<-coxph(Surv(intxsurv,dead)~strata(trtgp)+factor(kps)+factor(leuk2)+factor(donorgp),data=lk1601,ties="breslow",model=TRUE)
-coxd<-coxph.detail(cox,riskmat=TRUE)
-
-cox<-coxph(Surv(intxsurv,dead)~strata(trtgp)+factor(kps)+factor(leuk2)+age,data=lk1601,ties="breslow",model=TRUE)
-coxd<-coxph.detail(cox,riskmat=TRUE)
-
-cox<-coxph(Surv(intxrel,dfs)~strata(condted)+factor(sex),data=checked,ties="breslow",model=TRUE)
-coxd<-coxph.detail(cox,riskmat=TRUE)
-View(coxd$x)
 
 
-
-coxd$x <- coxd$x[order(as.numeric(row.names(coxd$x))), ]
-
-View(as.data.frame(coxd$x))
-
-cb=as.data.frame(a$adj.s.cb)
-cb2=as.data.frame(b$adj.s.cb)
 
 
